@@ -20,7 +20,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 # `cedar_ember` adds the stock of limit resets, the block Claude Code reads.
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
@@ -39,6 +39,8 @@ LOCK_TIMEOUT_SECONDS = 20
 SIGNED_OUT = "Connectez-vous à Claude Code"
 EXPIRED = "Session Claude expirée : ouvrez Claude Code"
 UNAVAILABLE = "Données Claude indisponibles"
+UNREADABLE_CREDENTIALS = "Identifiants Claude Code illisibles"
+CACHE_UNAVAILABLE = "Cache du widget inaccessible"
 
 
 class FetchError(RuntimeError):
@@ -90,12 +92,15 @@ def access_token(path: Path, now: float) -> str:
     except FileNotFoundError:
         raise RuntimeError(SIGNED_OUT) from None
     except (OSError, ValueError):
-        raise RuntimeError("Identifiants Claude Code illisibles") from None
+        raise RuntimeError(UNREADABLE_CREDENTIALS) from None
 
     oauth = credentials.get("claudeAiOauth") if isinstance(credentials, dict) else None
     token = oauth.get("accessToken") if isinstance(oauth, dict) else None
     if not isinstance(token, str) or not token:
         raise RuntimeError(SIGNED_OUT)
+    # Only visible ASCII can travel in the Authorization header.
+    if not all("!" <= character <= "~" for character in token):
+        raise RuntimeError(UNREADABLE_CREDENTIALS)
 
     expires_at = oauth.get("expiresAt")  # Milliseconds.
     if is_number(expires_at) and expires_at / 1000 <= now:
@@ -125,7 +130,7 @@ def fetch_usage(token: str, timeout: float) -> Any:
     # Messages never include exception text, which could quote the request.
     try:
         with OPENER.open(request, timeout=timeout) as response:
-            return json.load(response)
+            body = response.read()
     except urllib.error.HTTPError as error:
         error.close()
         if error.code == 401:
@@ -135,10 +140,14 @@ def fetch_usage(token: str, timeout: float) -> Any:
         if error.code == 429:
             raise FetchError("Trop de requêtes à Claude", retry_after(error.headers)) from None
         raise FetchError(f"Claude : erreur HTTP {error.code}") from None
-    except ValueError:  # Also raised for a token that is not a valid header.
-        raise FetchError("Réponse Claude inattendue") from None
+    except ValueError:  # A header value http.client rejects.
+        raise FetchError(UNREADABLE_CREDENTIALS) from None
     except (OSError, http.client.HTTPException):  # URLError and timeouts are OSErrors.
         raise FetchError("Claude injoignable") from None
+    try:
+        return json.loads(body)
+    except ValueError:
+        raise FetchError("Réponse Claude inattendue") from None
 
 
 def parse_reset(value: Any) -> int | None:
@@ -258,17 +267,13 @@ def outcome(state: dict[str, Any], now: float) -> dict[str, Any]:
 
 @contextmanager
 def locked(path: Path) -> Iterator[None]:
-    """Let one helper at a time decide whether to call the endpoint."""
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = open(path.with_name(path.name + ".lock"), "a")
-    except OSError:  # Without a writable cache there is no state to share.
-        handle = None
-    if handle is None:
-        yield
-        return
+    """Let one helper at a time decide whether to call the endpoint.
 
-    with handle:
+    Raises OSError if the lock file cannot be created, and TimeoutError if
+    another helper keeps the lock too long.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name(path.name + ".lock"), "a") as handle:
         deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
         while True:
             try:
@@ -281,36 +286,54 @@ def locked(path: Path) -> Iterator[None]:
         yield
 
 
-def read_limits(now: float, timeout: float) -> dict[str, Any]:
+def updated_state(
+    state: dict[str, Any], timeout: float, clock: Callable[[], float]
+) -> dict[str, Any]:
+    """Call the endpoint and return the state to store, timed from its answer."""
+    wait, warning = MIN_FETCH_INTERVAL_SECONDS, None
+    try:
+        raw = fetch_usage(access_token(credentials_path(), clock()), timeout)
+        usage_payload(raw, 0)
+    except FetchError as error:
+        wait, warning = error.retry_after, str(error)
+    except RuntimeError as error:  # Missing credentials or a response without limits.
+        warning = str(error)
+
+    answered_at = clock()
+    if warning is not None:
+        return {**state, "attemptedAt": answered_at, "retryAt": answered_at + wait, "warning": warning}
+    return {
+        "attemptedAt": answered_at,
+        "retryAt": answered_at + MIN_FETCH_INTERVAL_SECONDS,
+        "updatedAt": int(answered_at),
+        "limits": {name: raw.get(name) for name in STORED_FIELDS},
+    }
+
+
+def read_limits(timeout: float, clock: Callable[[], float] = time.time) -> dict[str, Any]:
     path = cache_path()
     try:
         with locked(path):
+            # Reading the clock under the lock keeps the attempt recorded by
+            # the previous holder in this helper's past.
+            now = clock()
             state = load_state(path)
             if fetch_due(state, now):
-                state = updated_state(state, now, timeout)
+                # Without a stored attempt the throttle cannot hold, so the
+                # endpoint is only called once the attempt is recorded.
+                save_state(
+                    path, {**state, "attemptedAt": now, "retryAt": now + MIN_FETCH_INTERVAL_SECONDS}
+                )
+                state = updated_state(state, timeout, clock)
                 try:
                     save_state(path, state)
                 except OSError:
-                    pass
+                    pass  # The recorded attempt still delays the next helper.
     except TimeoutError:  # Another helper is still waiting on the endpoint.
-        state = load_state(path)
+        now, state = clock(), load_state(path)
+    except OSError:
+        now, state = clock(), {**load_state(path), "warning": CACHE_UNAVAILABLE}
     return outcome(state, now)
-
-
-def updated_state(state: dict[str, Any], now: float, timeout: float) -> dict[str, Any]:
-    try:
-        raw = fetch_usage(access_token(credentials_path(), now), timeout)
-        usage_payload(raw, now)
-    except RuntimeError as error:
-        wait = getattr(error, "retry_after", MIN_FETCH_INTERVAL_SECONDS)
-        return {**state, "attemptedAt": now, "retryAt": now + wait, "warning": str(error)}
-
-    return {
-        "attemptedAt": now,
-        "retryAt": now + MIN_FETCH_INTERVAL_SECONDS,
-        "updatedAt": int(now),
-        "limits": {name: raw.get(name) for name in STORED_FIELDS},
-    }
 
 
 def main() -> int:
@@ -320,7 +343,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        emit(read_limits(time.time(), max(2.0, args.timeout)))
+        emit(read_limits(max(2.0, args.timeout)))
         return 0
     except Exception as error:  # Keep the executable data engine contract simple.
         emit({"ok": False, "error": str(error), "updatedAt": int(time.time())})

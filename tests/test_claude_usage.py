@@ -11,6 +11,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 import urllib.error
@@ -199,6 +201,9 @@ class AccessTokenTest(unittest.TestCase):
         self.path.write_text("{", encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "illisibles"):
             CLAUDE_USAGE.access_token(self.path, NOW)
+        for token in ("two words", "line\nbreak", "jeton-é"):
+            with self.subTest(token), self.assertRaisesRegex(RuntimeError, "illisibles"):
+                CLAUDE_USAGE.access_token(write_json(self.path, credentials(token=token)), NOW)
 
     def test_reports_an_expired_token(self) -> None:
         write_json(self.path, credentials(expires_at=NOW * 1000))
@@ -236,7 +241,7 @@ class FetchTest(unittest.TestCase):
             (urllib.error.URLError("offline"), "injoignable"),
             (TimeoutError(), "injoignable"),
             (http.client.IncompleteRead(b""), "injoignable"),
-            (ValueError(f"Invalid header value b'Bearer {TOKEN}'"), "inattendue"),
+            (ValueError(f"Invalid header value b'Bearer {TOKEN}'"), "illisibles"),
         ):
             with self.subTest(message), self.assertRaises(CLAUDE_USAGE.FetchError) as raised:
                 self.fetch(side_effect=error)
@@ -290,7 +295,7 @@ class ReadLimitsTest(unittest.TestCase):
 
     def read(self, now=NOW, **fetch):
         with mock.patch.object(CLAUDE_USAGE, "fetch_usage", **fetch) as fetch_usage:
-            return CLAUDE_USAGE.read_limits(now, 5), fetch_usage
+            return CLAUDE_USAGE.read_limits(5, clock=lambda: now), fetch_usage
 
     def fail(self, now, message="Claude injoignable", retry_after=None):
         error = CLAUDE_USAGE.FetchError(message, *(() if retry_after is None else (retry_after,)))
@@ -365,7 +370,7 @@ class ReadLimitsTest(unittest.TestCase):
             self.fail(NOW)
         with mock.patch.object(CLAUDE_USAGE, "fetch_usage", return_value=USAGE) as fetch_usage:
             with self.assertRaisesRegex(RuntimeError, "Claude injoignable"):
-                CLAUDE_USAGE.read_limits(NOW + 10, 5)
+                CLAUDE_USAGE.read_limits(5, clock=lambda: NOW + 10)
         fetch_usage.assert_not_called()
         payload, _ = self.read(now=NOW + 30, return_value=USAGE)
         self.assertEqual(payload["updatedAt"], int(NOW + 30))
@@ -399,10 +404,56 @@ class ReadLimitsTest(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     self.fail(NOW + 5)
 
-    def test_returns_limits_when_the_cache_cannot_be_written(self) -> None:
+    def test_skips_the_endpoint_when_the_attempt_cannot_be_recorded(self) -> None:
         self.cache.mkdir(parents=True)
-        payload, _ = self.read(return_value=USAGE)
-        self.assertEqual(payload, PAYLOAD)
+        with mock.patch.object(CLAUDE_USAGE, "fetch_usage", return_value=USAGE) as fetch_usage:
+            with self.assertRaisesRegex(RuntimeError, CLAUDE_USAGE.CACHE_UNAVAILABLE):
+                CLAUDE_USAGE.read_limits(5, clock=lambda: NOW)
+        fetch_usage.assert_not_called()
+
+    def test_keeps_the_last_limits_when_the_cache_becomes_read_only(self) -> None:
+        self.read(return_value=USAGE)
+        with mock.patch.object(CLAUDE_USAGE, "save_state", side_effect=OSError):
+            payload, fetch_usage = self.read(now=NOW + 600, return_value=USAGE)
+        fetch_usage.assert_not_called()
+        self.assertEqual(payload, {**PAYLOAD, "warning": CLAUDE_USAGE.CACHE_UNAVAILABLE})
+
+    def test_times_the_backoff_from_the_answer(self) -> None:
+        clock = [NOW]
+
+        def slow_refusal(*_):
+            clock[0] += 15
+            raise CLAUDE_USAGE.FetchError("Trop de requêtes à Claude", 300)
+
+        with mock.patch.object(CLAUDE_USAGE, "fetch_usage", side_effect=slow_refusal):
+            with self.assertRaises(RuntimeError):
+                CLAUDE_USAGE.read_limits(5, clock=lambda: clock[0])
+        stored = json.loads(self.cache.read_text(encoding="utf-8"))
+        self.assertEqual(stored["retryAt"], NOW + 315)
+
+    def test_waits_for_the_helper_holding_the_lock(self) -> None:
+        clock = [NOW]
+        lock = self.cache.parent / "usage.json.lock"
+        lock.parent.mkdir()
+        holder = lock.open("a")
+        self.addCleanup(holder.close)
+        fcntl.flock(holder, fcntl.LOCK_EX)
+
+        with mock.patch.object(CLAUDE_USAGE, "fetch_usage", return_value=USAGE) as fetch_usage:
+            waiter = threading.Thread(
+                target=CLAUDE_USAGE.read_limits, args=(5,), kwargs={"clock": lambda: clock[0]}
+            )
+            waiter.start()
+            time.sleep(0.3)
+            # The holder fetches at NOW + 1 while the waiter is blocked.
+            CLAUDE_USAGE.save_state(
+                self.cache,
+                {"attemptedAt": NOW + 1, "retryAt": NOW + 31, "updatedAt": NOW + 1, "limits": USAGE},
+            )
+            clock[0] = NOW + 2
+            fcntl.flock(holder, fcntl.LOCK_UN)
+            waiter.join(timeout=10)
+        fetch_usage.assert_not_called()
 
     def test_skips_the_endpoint_while_another_helper_holds_the_lock(self) -> None:
         self.read(return_value=USAGE)
@@ -453,20 +504,22 @@ class CommandLineTest(unittest.TestCase):
         self.assertNotIn("warning", payload)
 
     def test_never_prints_the_token(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_json(root / ".credentials.json", credentials(token="leak\nme"))
-            output = io.StringIO()
-            environment = {"CLAUDE_CONFIG_DIR": str(root), "CLAUDE_USAGE_CACHE": str(root / "usage.json")}
-            with mock.patch.dict(os.environ, environment), mock.patch.object(
-                sys, "argv", ["claude_usage.py"]
-            ), mock.patch.object(
-                CLAUDE_USAGE.OPENER, "open", side_effect=ValueError("Invalid header value b'Bearer leak\\nme'")
-            ), contextlib.redirect_stdout(output):
-                code = CLAUDE_USAGE.main()
-        self.assertEqual(code, 1)
-        self.assertNotIn("leak", output.getvalue())
-        self.assertEqual(json.loads(output.getvalue())["error"], "Réponse Claude inattendue")
+        # A token http.client would reject, and one it rejects anyway.
+        for token in ("leak\nme", "leak-me"):
+            with self.subTest(token), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_json(root / ".credentials.json", credentials(token=token, expires_at=None))
+                output = io.StringIO()
+                environment = {"CLAUDE_CONFIG_DIR": str(root), "CLAUDE_USAGE_CACHE": str(root / "usage.json")}
+                with mock.patch.dict(os.environ, environment), mock.patch.object(
+                    sys, "argv", ["claude_usage.py"]
+                ), mock.patch.object(
+                    CLAUDE_USAGE.OPENER, "open", side_effect=ValueError(f"Invalid header value b'Bearer {token}'")
+                ), contextlib.redirect_stdout(output):
+                    code = CLAUDE_USAGE.main()
+                self.assertEqual(code, 1)
+                self.assertNotIn("leak", output.getvalue())
+                self.assertEqual(json.loads(output.getvalue())["error"], CLAUDE_USAGE.UNREADABLE_CREDENTIALS)
 
 
 if __name__ == "__main__":
