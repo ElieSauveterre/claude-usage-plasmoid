@@ -10,11 +10,13 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from datetime import datetime
+import email.utils
 import fcntl
 import http.client
 import json
 import math
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -33,7 +35,7 @@ STORED_FIELDS = (*WINDOWS.values(), "cedar_ember")
 # one record of the last attempt and waits this long before the next one.
 MIN_FETCH_INTERVAL_SECONDS = 30
 RATE_LIMITED_BACKOFF_SECONDS = 300
-MAX_BACKOFF_SECONDS = 3600
+MAX_BACKOFF_SECONDS = 86400
 LOCK_TIMEOUT_SECONDS = 20
 
 SIGNED_OUT = "Connectez-vous à Claude Code"
@@ -109,12 +111,20 @@ def access_token(path: Path, now: float) -> str:
 
 
 def retry_after(headers: Any) -> float:
+    """Return the wait a 429 asks for, in seconds or as an HTTP date."""
     value = headers.get("Retry-After") if headers is not None else None
+    if not isinstance(value, str):
+        return RATE_LIMITED_BACKOFF_SECONDS
+    if re.fullmatch(r"\s*[0-9]{1,6}\s*", value):
+        requested = float(value)
+    else:
+        try:
+            requested = email.utils.parsedate_to_datetime(value).timestamp() - time.time()
+        except (TypeError, ValueError, OverflowError):
+            return RATE_LIMITED_BACKOFF_SECONDS
     # Rate limiting can persist past a short Retry-After, so it only extends
-    # the default backoff.
-    if isinstance(value, str) and value.strip().isdigit():
-        return min(MAX_BACKOFF_SECONDS, max(RATE_LIMITED_BACKOFF_SECONDS, int(value)))
-    return RATE_LIMITED_BACKOFF_SECONDS
+    # the default backoff, up to a bound against absurd values.
+    return min(MAX_BACKOFF_SECONDS, max(RATE_LIMITED_BACKOFF_SECONDS, requested))
 
 
 def fetch_usage(token: str, timeout: float) -> Any:
@@ -319,6 +329,8 @@ def updated_state(
         wait, warning = error.retry_after, str(error)
     except RuntimeError as error:  # Missing credentials or a response without limits.
         warning = str(error)
+    except Exception:  # Anything else still keeps the last limits on screen.
+        warning = UNAVAILABLE
 
     answered_at = clock()
     if warning is not None:

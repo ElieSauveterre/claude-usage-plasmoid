@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import contextlib
+import email.utils
 import fcntl
 import http.client
 import importlib.util
@@ -279,11 +280,17 @@ class FetchTest(unittest.TestCase):
             ({"Retry-After": "900"}, 900),
             ({"Retry-After": "1"}, CLAUDE_USAGE.RATE_LIMITED_BACKOFF_SECONDS),
             ({"Retry-After": "999999"}, CLAUDE_USAGE.MAX_BACKOFF_SECONDS),
-            ({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}, CLAUDE_USAGE.RATE_LIMITED_BACKOFF_SECONDS),
+            ({"Retry-After": "7200"}, 7200),
+            ({"Retry-After": "soon"}, CLAUDE_USAGE.RATE_LIMITED_BACKOFF_SECONDS),
+            ({"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}, CLAUDE_USAGE.RATE_LIMITED_BACKOFF_SECONDS),
+            ({"Retry-After": email.utils.formatdate(time.time() + 7200, usegmt=True)}, 7200),
+            ({"Retry-After": "\xb2"}, CLAUDE_USAGE.RATE_LIMITED_BACKOFF_SECONDS),
+            ({"Retry-After": "9" * 5000}, CLAUDE_USAGE.RATE_LIMITED_BACKOFF_SECONDS),
         ):
             with self.subTest(headers), self.assertRaises(CLAUDE_USAGE.FetchError) as raised:
                 self.fetch(side_effect=http_error(429, headers))
-            self.assertEqual(raised.exception.retry_after, wait)
+            # An HTTP date is measured from now, to the second.
+            self.assertAlmostEqual(raised.exception.retry_after, wait, delta=2)
 
     def test_refuses_redirects(self) -> None:
         handler = next(
@@ -357,6 +364,12 @@ class ReadLimitsTest(unittest.TestCase):
         payload, _ = self.fail(NOW + 600)
 
         self.assertEqual(payload, {**PAYLOAD, "warning": "Claude injoignable"})
+
+    def test_keeps_the_last_limits_after_an_unexpected_failure(self) -> None:
+        self.read(return_value=USAGE)
+        payload, _ = self.read(now=NOW + 600, side_effect=KeyError("surprise"))
+
+        self.assertEqual(payload, {**PAYLOAD, "warning": CLAUDE_USAGE.UNAVAILABLE})
 
     def test_waits_after_a_failure(self) -> None:
         self.read(return_value=USAGE)
