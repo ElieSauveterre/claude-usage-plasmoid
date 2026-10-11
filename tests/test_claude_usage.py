@@ -581,6 +581,25 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(payload["fiveHour"]["remainingPercent"], 77.0)
         self.assertNotIn("warning", payload)
 
+    def test_reports_the_next_attempt_without_stored_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_json(root / ".credentials.json", credentials(expires_at=None))
+            environment = {"CLAUDE_CONFIG_DIR": str(root), "CLAUDE_USAGE_CACHE": str(root / "usage.json")}
+            refusal = CLAUDE_USAGE.FetchError("Trop de requêtes à Claude", 7200)
+            for attempt in ("refused", "throttled"):
+                output = io.StringIO()
+                with self.subTest(attempt), mock.patch.dict(os.environ, environment), mock.patch.object(
+                    sys, "argv", ["claude_usage.py"]
+                ), mock.patch.object(
+                    CLAUDE_USAGE, "fetch_usage", side_effect=refusal
+                ) as fetch_usage, contextlib.redirect_stdout(output):
+                    self.assertEqual(CLAUDE_USAGE.main(), 1)
+                payload = json.loads(output.getvalue())
+                self.assertEqual(payload["error"], "Trop de requêtes à Claude")
+                self.assertAlmostEqual(payload["retryAt"], time.time() + 7200, delta=5)
+            fetch_usage.assert_not_called()
+
     def test_hides_unexpected_error_text(self) -> None:
         output = io.StringIO()
         with mock.patch.object(sys, "argv", ["claude_usage.py"]), mock.patch.object(

@@ -48,6 +48,8 @@ CACHE_UNAVAILABLE = "Cache du widget inaccessible"
 class LimitsError(RuntimeError):
     """A failure whose message, in French, can be shown in the widget."""
 
+    retry_at: float | None = None
+
 
 class FetchError(LimitsError):
     def __init__(self, message: str, retry_after: float = MIN_FETCH_INTERVAL_SECONDS) -> None:
@@ -296,15 +298,18 @@ def fetch_due(state: dict[str, Any], now: float) -> bool:
 
 def outcome(state: dict[str, Any], now: float) -> dict[str, Any]:
     result, warning = last_result(state), last_warning(state)
+    retry_at = state.get("retryAt")
+    retry_at = retry_at if is_number(retry_at) else None
     if result is None:
-        raise LimitsError(warning or UNAVAILABLE)
+        error = LimitsError(warning or UNAVAILABLE)
+        error.retry_at = retry_at
+        raise error
     result = as_of(result, now)
     if not warning:
         return result
     # Keep the last known limits on screen; their age stays visible, and so
     # does the next attempt after a long backoff.
-    retry_at = state.get("retryAt")
-    return {**result, "warning": warning, "retryAt": retry_at if is_number(retry_at) else None}
+    return {**result, "warning": warning, "retryAt": retry_at}
 
 
 @contextmanager
@@ -392,8 +397,13 @@ def main() -> int:
         emit(read_limits(max(2.0, args.timeout)))
         return 0
     except Exception as error:  # Keep the executable data engine contract simple.
-        message = str(error) if isinstance(error, LimitsError) else UNAVAILABLE
-        emit({"ok": False, "error": message, "updatedAt": int(time.time())})
+        known = isinstance(error, LimitsError)
+        emit({
+            "ok": False,
+            "error": str(error) if known else UNAVAILABLE,
+            "retryAt": error.retry_at if known else None,
+            "updatedAt": int(time.time()),
+        })
         return 1
 
 

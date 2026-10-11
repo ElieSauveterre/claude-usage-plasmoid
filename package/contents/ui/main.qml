@@ -89,7 +89,8 @@ PlasmoidItem {
             try {
                 const payload = JSON.parse(output.trim())
                 if (!payload.ok) {
-                    root.errorMessage = payload.error || qsTr("Données Claude indisponibles")
+                    root.errorMessage = (payload.error || qsTr("Données Claude indisponibles"))
+                        + root.retryLabel(payload.retryAt)
                     return
                 }
                 root.applyPayload(payload)
