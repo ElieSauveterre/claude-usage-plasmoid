@@ -91,7 +91,6 @@ PlasmoidItem {
                 if (!payload.ok) {
                     root.errorMessage = (payload.error || qsTr("Données Claude indisponibles"))
                         + root.retryLabel(payload.retryAt)
-                    root.scheduleRetry(payload.retryAt)
                     return
                 }
                 root.applyPayload(payload)
@@ -106,13 +105,6 @@ PlasmoidItem {
         interval: 5 * 60 * 1000
         repeat: true
         running: true
-        onTriggered: root.refresh()
-    }
-
-    // Retry as soon as a backoff ends, so the announced time holds.
-    // A refresh already running when it fires re-arms it with its own result.
-    Timer {
-        id: retryTimer
         onTriggered: root.refresh()
     }
 
@@ -174,29 +166,15 @@ PlasmoidItem {
         return date.toLocaleString(Qt.locale(), "d MMM HH:mm")
     }
 
-    function scheduleRetry(timestamp) {
-        retryTimer.stop()
-        if (!timestamp) {
-            return
-        }
-        // A backoff that already ended comes from a helper that checked just
-        // before its end, so the next refresh will call the endpoint.
-        const delay = Math.max(0, timestamp * 1000 - Date.now())
-        // The helper caps backoffs at a day; anything later is not a backoff.
-        if (delay <= 24 * 60 * 60 * 1000) {
-            retryTimer.interval = delay + 2000
-            retryTimer.start()
-        }
-    }
-
-    // The helper only reports the end of a rate-limit backoff.
+    // The helper only reports the end of a rate-limit backoff; the next poll
+    // after it calls the endpoint again.
     function retryLabel(timestamp) {
         if (!timestamp || timestamp * 1000 <= Date.now()) {
             return ""
         }
         const date = new Date(timestamp * 1000)
         const sameDay = date.toDateString() === new Date().toDateString()
-        return " · " + qsTr("nouvel essai à %1").arg(date.toLocaleString(Qt.locale(), sameDay ? "HH:mm" : "d MMM HH:mm"))
+        return " · " + qsTr("nouvel essai après %1").arg(date.toLocaleString(Qt.locale(), sameDay ? "HH:mm" : "d MMM HH:mm"))
     }
 
     function capturedLabel(timestamp) {
@@ -223,7 +201,6 @@ PlasmoidItem {
         resetCreditsAvailable = hasResetCredits ? payload.resetCreditsAvailable : 0
         resetCreditExpiryText = deadlineLabel(payload.nextResetCreditExpiresAt)
         warningMessage = payload.warning ? payload.warning + retryLabel(payload.retryAt) : ""
-        scheduleRetry(payload.warning ? payload.retryAt : null)
         lastUpdatedText = capturedLabel(payload.updatedAt)
     }
 }
