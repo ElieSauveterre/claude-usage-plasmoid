@@ -2,13 +2,13 @@
 
 Un plasmoïde KDE Plasma 6 qui affiche les limites de votre abonnement Claude Pro ou Max : le pourcentage restant sur la fenêtre de 5 heures, sur la fenêtre de 7 jours et leurs heures de remise à zéro.
 
-Les données proviennent du champ documenté `rate_limits` que Claude Code transmet à sa [status line](https://code.claude.com/docs/en/statusline). Le widget ne lit jamais `~/.claude/.credentials.json` et n'appelle aucune API : la status line enregistre un instantané local que le widget relit chaque minute.
+Le widget interroge l'usage du compte connecté à Claude Code. Il compte donc l'utilisation de Claude Code, de claude.ai et des autres applications Claude, même quand Claude Code n'est pas ouvert.
 
 ## Prérequis
 
 - KDE Plasma 6 avec les modules `plasma5support` et `org.kde.quickcharts`
 - Python 3
-- Claude Code 2.1.211 ou plus récent, connecté avec un abonnement Claude Pro ou Max
+- Claude Code, connecté avec un abonnement Claude Pro ou Max (`claude auth login`)
 
 ## Installation
 
@@ -32,30 +32,13 @@ Pour mettre à jour une installation existante :
 kpackagetool6 -t Plasma/Applet -u claude-usage.plasmoid
 ```
 
-## Brancher la status line Claude Code
+## Source des données
 
-Ajoutez dans `~/.claude/settings.json` :
+Toutes les 5 minutes, et à l'ouverture du widget, le helper lit le jeton d'accès que Claude Code enregistre dans `~/.claude/.credentials.json` (ou `$CLAUDE_CONFIG_DIR/.credentials.json`) et l'envoie uniquement au point d'accès d'usage d'Anthropic (`https://api.anthropic.com/api/oauth/usage`). Ce point d'accès n'est pas documenté publiquement et peut changer.
 
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "python3 ~/.local/share/plasma/plasmoids/com.elie.claudeusage/contents/code/claude_usage.py record"
-  }
-}
-```
+Le widget ne renouvelle jamais le jeton : Claude Code le fait quand il tourne. Si le jeton a expiré, le widget affiche « Session Claude expirée : ouvrez Claude Code » ; lancer Claude Code suffit à le renouveler.
 
-La status line affiche alors `Claude 5h 77% · 7j 59% restant`. Si vous avez déjà une status line, passez-la après `--` : le helper enregistre les limites puis lui transmet le même JSON et affiche sa sortie. Si elle échoue, le helper affiche son propre résumé.
-
-```json
-"command": "python3 ~/.local/share/plasma/plasmoids/com.elie.claudeusage/contents/code/claude_usage.py record -- ~/.claude/statusline.sh"
-```
-
-Claude Code ne fournit `rate_limits` qu'après la première réponse de l'API dans une session. Le widget affiche donc les dernières valeurs connues avec l'heure de l'observation la moins récente (« Données du 14:32 ») ; l'utilisation faite sur claude.ai entre deux sessions Claude Code n'y apparaît qu'à la session suivante. Une fenêtre dont l'heure de remise à zéro est passée est affichée à 100 %.
-
-Chaque session Claude Code relance sa status line avec les limites de sa dernière réponse, même lorsqu'elle est inactive. Le JSON ne contenant pas d'horodatage, le helper suit chaque session (`session_id`). Une nouvelle réponse de l'API, repérée par un coût cumulé de la session (`cost.total_cost_usd`) jamais vu pour cette session, est datée par l'heure de modification du transcript (`transcript_path`, dont seules les métadonnées sont lues). Un coût déjà vu, par exemple celui d'un autre terminal ouvert sur la même session, est ignoré, et une session sans réponse (coût nul, par exemple juste après `/clear`) n'est pas enregistrée. Si une politique `modelPricing` fixe tous les tarifs à 0, le coût reste nul et le widget ne reçoit aucune donnée. Le widget affiche, pour chaque fenêtre, l'observation la plus récente. Une session est oubliée une semaine après la remise à zéro de toutes ses fenêtres.
-
-L'instantané est stocké dans `~/.cache/claude-usage-plasmoid/rate_limits.json`. Il ne contient que les identifiants de session, leurs coûts cumulés déjà vus, les pourcentages, les heures de remise à zéro et l'heure d'observation.
+Le dernier résultat est gardé dans `~/.cache/claude-usage-plasmoid/usage.json`, sans le jeton. Tous les widgets partagent ce fichier : le point d'accès est interrogé au plus une fois toutes les 30 secondes, y compris après un échec, et après un refus pour trop de requêtes le widget attend le délai demandé par Anthropic (5 minutes par défaut). Si une mise à jour échoue (réseau, jeton expiré, trop de requêtes), le widget garde les dernières valeurs avec leur heure et affiche la raison en dessous ; une fenêtre dont l'heure de remise à zéro est passée est affichée à 100 %.
 
 ## Vérifier la source de données
 
@@ -78,5 +61,3 @@ qml6 tests/CompactHostProbe.qml
 ```bash
 kpackagetool6 -t Plasma/Applet -r com.elie.claudeusage
 ```
-
-Retirez aussi l'entrée `statusLine` de `~/.claude/settings.json`.

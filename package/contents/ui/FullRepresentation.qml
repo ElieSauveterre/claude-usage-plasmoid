@@ -17,6 +17,8 @@ Item {
     required property bool loading
     required property string errorMessage
     required property string lastUpdatedText
+    required property string warningMessage
+    readonly property bool showWarning: full.warningMessage.length > 0 && full.errorMessage.length === 0
     signal refreshRequested()
 
     Layout.minimumWidth: 250
@@ -24,7 +26,7 @@ Item {
     Layout.preferredWidth: 260
     Layout.preferredHeight: implicitHeight
     implicitWidth: 260
-    implicitHeight: 258 + (full.hasWeekly ? 24 : 0) + (full.showWeeklyReset ? 24 : 0)
+    implicitHeight: 258 + (full.hasWeekly ? 24 : 0) + (full.showWeeklyReset ? 24 : 0) + (full.showWarning ? 18 : 0)
 
     Rectangle {
         anchors.fill: parent
@@ -115,6 +117,16 @@ Item {
                 font.pixelSize: 9
                 horizontalAlignment: Text.AlignHCenter
                 text: full.errorMessage.length > 0 ? full.errorMessage : full.lastUpdatedText
+            }
+
+            Text {
+                visible: full.showWarning
+                Layout.fillWidth: true
+                color: "#ef9a9a"
+                elide: Text.ElideRight
+                font.pixelSize: 9
+                horizontalAlignment: Text.AlignHCenter
+                text: full.warningMessage
             }
         }
     }

@@ -17,6 +17,7 @@ PlasmoidItem {
     property bool loading: false
     property string errorMessage: ""
     property string lastUpdatedText: ""
+    property string warningMessage: ""
     property string activeCommand: ""
 
     Plasmoid.backgroundHints: PlasmaCore.Types.NoBackground
@@ -32,7 +33,10 @@ PlasmoidItem {
             return ""
         }
         const summary = qsTr("%1 % restant (%2)").arg(Math.round(remainingPercent)).arg(windowLabel)
-        return resetText.length > 0 ? summary + " · " + resetText : summary
+        const text = resetText.length > 0 ? summary + " · " + resetText : summary
+        return warningMessage.length > 0
+            ? text + "\n" + lastUpdatedText + " · " + warningMessage
+            : text
     }
 
     compactRepresentation: CompactRepresentation {
@@ -58,6 +62,7 @@ PlasmoidItem {
         loading: root.loading
         errorMessage: root.errorMessage
         lastUpdatedText: root.lastUpdatedText
+        warningMessage: root.warningMessage
         onRefreshRequested: root.refresh()
     }
 
@@ -71,6 +76,7 @@ PlasmoidItem {
             }
 
             disconnectSource(sourceName)
+            watchdog.stop()
             root.loading = false
 
             const output = data.stdout || ""
@@ -87,12 +93,27 @@ PlasmoidItem {
         }
     }
 
-    // Reading the local snapshot is cheap; Claude Code refreshes it while sessions run.
+    // The usage endpoint rate-limits frequent polling.
     Timer {
-        interval: 60 * 1000
+        interval: 5 * 60 * 1000
         repeat: true
         running: true
         onTriggered: root.refresh()
+    }
+
+    // A helper stuck on the network must not block later refreshes.
+    Timer {
+        id: watchdog
+        interval: 60 * 1000
+        onTriggered: {
+            executable.disconnectSource(root.activeCommand)
+            root.loading = false
+            if (root.windowLabel.length > 0) {
+                root.warningMessage = qsTr("Délai dépassé")
+            } else {
+                root.errorMessage = qsTr("Délai dépassé")
+            }
+        }
     }
 
     Component.onCompleted: refresh()
@@ -119,6 +140,7 @@ PlasmoidItem {
         errorMessage = ""
         activeCommand = "python3 " + shellQuote(helperPath()) + " --request-id " + Date.now()
         executable.connectSource(activeCommand)
+        watchdog.restart()
     }
 
     function resetLabel(timestamp) {
@@ -149,6 +171,7 @@ PlasmoidItem {
         weeklyRemainingPercent = weekly ? weekly.remainingPercent : 0
         weeklyResetText = weekly ? resetLabel(weekly.resetsAt) : ""
         errorMessage = ""
+        warningMessage = payload.warning || ""
         lastUpdatedText = capturedLabel(payload.updatedAt)
     }
 }
