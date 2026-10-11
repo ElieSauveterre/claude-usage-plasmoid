@@ -110,17 +110,10 @@ PlasmoidItem {
     }
 
     // Retry as soon as a backoff ends, so the announced time holds.
+    // A refresh already running when it fires re-arms it with its own result.
     Timer {
         id: retryTimer
-        onTriggered: {
-            if (root.loading) {
-                // A refresh started before the backoff ended; try again after it.
-                interval = 5000
-                start()
-            } else {
-                root.refresh()
-            }
-        }
+        onTriggered: root.refresh()
     }
 
     // A helper stuck on the network must not block later refreshes.
@@ -183,9 +176,14 @@ PlasmoidItem {
 
     function scheduleRetry(timestamp) {
         retryTimer.stop()
-        const delay = timestamp ? timestamp * 1000 - Date.now() : 0
+        if (!timestamp) {
+            return
+        }
+        // A backoff that already ended comes from a helper that checked just
+        // before its end, so the next refresh will call the endpoint.
+        const delay = Math.max(0, timestamp * 1000 - Date.now())
         // The helper caps backoffs at a day; anything later is not a backoff.
-        if (delay > 0 && delay <= 24 * 60 * 60 * 1000) {
+        if (delay <= 24 * 60 * 60 * 1000) {
             retryTimer.interval = delay + 2000
             retryTimer.start()
         }

@@ -408,7 +408,6 @@ class ReadLimitsTest(unittest.TestCase):
         self.assertEqual(payload["retryAt"], NOW + 1000)
 
     def test_honors_the_rate_limit_backoff(self) -> None:
-
         self.read(return_value=USAGE)
         self.fail_fetch(NOW + 600, "Trop de requêtes à Claude", retry_after=300)
 
