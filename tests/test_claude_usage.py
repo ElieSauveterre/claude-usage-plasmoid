@@ -283,14 +283,23 @@ class FetchTest(unittest.TestCase):
             ({"Retry-After": "7200"}, 7200),
             ({"Retry-After": "soon"}, CLAUDE_USAGE.RATE_LIMITED_BACKOFF_SECONDS),
             ({"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}, CLAUDE_USAGE.RATE_LIMITED_BACKOFF_SECONDS),
-            ({"Retry-After": email.utils.formatdate(time.time() + 7200, usegmt=True)}, 7200),
             ({"Retry-After": "\xb2"}, CLAUDE_USAGE.RATE_LIMITED_BACKOFF_SECONDS),
             ({"Retry-After": "9" * 5000}, CLAUDE_USAGE.RATE_LIMITED_BACKOFF_SECONDS),
         ):
             with self.subTest(headers), self.assertRaises(CLAUDE_USAGE.FetchError) as raised:
                 self.fetch(side_effect=http_error(429, headers))
-            # An HTTP date is measured from now, to the second.
-            self.assertAlmostEqual(raised.exception.retry_after, wait, delta=2)
+            self.assertEqual(raised.exception.retry_after, wait)
+
+    def test_reads_a_retry_after_date_in_gmt(self) -> None:
+        deadline = time.time() + 7200
+        for value in (
+            email.utils.formatdate(deadline, usegmt=True),
+            email.utils.formatdate(deadline).replace("+0000", "-0000"),
+        ):
+            with self.subTest(value), self.assertRaises(CLAUDE_USAGE.FetchError) as raised:
+                self.fetch(side_effect=http_error(429, {"Retry-After": value}))
+            # The date has whole seconds and is measured from the current time.
+            self.assertAlmostEqual(raised.exception.retry_after, 7200, delta=2)
 
     def test_refuses_redirects(self) -> None:
         handler = next(
@@ -325,7 +334,7 @@ class ReadLimitsTest(unittest.TestCase):
         with mock.patch.object(CLAUDE_USAGE, "fetch_usage", **fetch) as fetch_usage:
             return CLAUDE_USAGE.read_limits(5, clock=lambda: now), fetch_usage
 
-    def fail(self, now, message="Claude injoignable", retry_after=None):
+    def fail_fetch(self, now, message="Claude injoignable", retry_after=None):
         error = CLAUDE_USAGE.FetchError(message, *(() if retry_after is None else (retry_after,)))
         return self.read(now=now, side_effect=error)
 
@@ -361,23 +370,24 @@ class ReadLimitsTest(unittest.TestCase):
 
     def test_keeps_the_last_limits_when_a_fetch_fails(self) -> None:
         self.read(return_value=USAGE)
-        payload, _ = self.fail(NOW + 600)
+        payload, _ = self.fail_fetch(NOW + 600)
 
-        self.assertEqual(payload, {**PAYLOAD, "warning": "Claude injoignable"})
+        self.assertEqual(payload, {**PAYLOAD, "warning": "Claude injoignable", "retryAt": NOW + 630})
 
     def test_keeps_the_last_limits_after_an_unexpected_failure(self) -> None:
         self.read(return_value=USAGE)
-        payload, _ = self.read(now=NOW + 600, side_effect=KeyError("surprise"))
+        # Python's own RuntimeError subclasses are not messages for the widget.
+        payload, _ = self.read(now=NOW + 600, side_effect=RecursionError("Stack overflow"))
 
-        self.assertEqual(payload, {**PAYLOAD, "warning": CLAUDE_USAGE.UNAVAILABLE})
+        self.assertEqual(payload, {**PAYLOAD, "warning": CLAUDE_USAGE.UNAVAILABLE, "retryAt": NOW + 630})
 
     def test_waits_after_a_failure(self) -> None:
         self.read(return_value=USAGE)
-        self.fail(NOW + 600)
+        self.fail_fetch(NOW + 600)
         payload, fetch_usage = self.read(now=NOW + 629, return_value=USAGE)
 
         fetch_usage.assert_not_called()
-        self.assertEqual(payload, {**PAYLOAD, "warning": "Claude injoignable"})
+        self.assertEqual(payload, {**PAYLOAD, "warning": "Claude injoignable", "retryAt": NOW + 630})
 
         payload, fetch_usage = self.read(now=NOW + 630, return_value=USAGE)
         fetch_usage.assert_called_once()
@@ -385,7 +395,7 @@ class ReadLimitsTest(unittest.TestCase):
 
     def test_honors_the_rate_limit_backoff(self) -> None:
         self.read(return_value=USAGE)
-        self.fail(NOW + 600, "Trop de requêtes à Claude", retry_after=300)
+        self.fail_fetch(NOW + 600, "Trop de requêtes à Claude", retry_after=300)
 
         _, fetch_usage = self.read(now=NOW + 899, return_value=USAGE)
         fetch_usage.assert_not_called()
@@ -401,7 +411,7 @@ class ReadLimitsTest(unittest.TestCase):
 
     def test_waits_after_a_failure_without_stored_limits(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "Claude injoignable"):
-            self.fail(NOW)
+            self.fail_fetch(NOW)
         with mock.patch.object(CLAUDE_USAGE, "fetch_usage", return_value=USAGE) as fetch_usage:
             with self.assertRaisesRegex(RuntimeError, "Claude injoignable"):
                 CLAUDE_USAGE.read_limits(5, clock=lambda: NOW + 10)
@@ -416,7 +426,7 @@ class ReadLimitsTest(unittest.TestCase):
 
     def test_shows_stored_windows_past_their_reset_as_unused(self) -> None:
         self.read(return_value=USAGE)
-        payload, _ = self.fail(FIVE_HOUR_RESET_AT)
+        payload, _ = self.fail_fetch(FIVE_HOUR_RESET_AT)
 
         self.assertEqual(payload["fiveHour"], {"remainingPercent": 100.0, "resetsAt": None})
         self.assertEqual(payload["sevenDay"], PAYLOAD["sevenDay"])
@@ -436,7 +446,7 @@ class ReadLimitsTest(unittest.TestCase):
                 self.assertEqual(payload["fiveHour"], PAYLOAD["fiveHour"])
                 self.cache.write_text(value, encoding="utf-8")
                 with self.assertRaises(RuntimeError):
-                    self.fail(NOW + 5)
+                    self.fail_fetch(NOW + 5)
 
     def test_skips_the_endpoint_when_the_attempt_cannot_be_recorded(self) -> None:
         self.cache.mkdir(parents=True)
@@ -450,7 +460,9 @@ class ReadLimitsTest(unittest.TestCase):
         with mock.patch.object(CLAUDE_USAGE, "save_state", side_effect=OSError):
             payload, fetch_usage = self.read(now=NOW + 600, return_value=USAGE)
         fetch_usage.assert_not_called()
-        self.assertEqual(payload, {**PAYLOAD, "warning": CLAUDE_USAGE.CACHE_UNAVAILABLE})
+        self.assertEqual(
+            payload, {**PAYLOAD, "warning": CLAUDE_USAGE.CACHE_UNAVAILABLE, "retryAt": NOW + 30}
+        )
 
     def test_keeps_the_backoff_when_the_answer_cannot_be_stored(self) -> None:
         real_save = CLAUDE_USAGE.save_state
@@ -464,7 +476,7 @@ class ReadLimitsTest(unittest.TestCase):
 
         with mock.patch.object(CLAUDE_USAGE, "save_state", side_effect=save_once):
             with self.assertRaises(RuntimeError):
-                self.fail(NOW, "Trop de requêtes à Claude", retry_after=300)
+                self.fail_fetch(NOW, "Trop de requêtes à Claude", retry_after=300)
         with mock.patch.object(CLAUDE_USAGE, "fetch_usage", return_value=USAGE) as fetch_usage:
             with self.assertRaises(RuntimeError):
                 CLAUDE_USAGE.read_limits(5, clock=lambda: NOW + 299)
@@ -568,6 +580,15 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(payload["fiveHour"]["remainingPercent"], 77.0)
         self.assertNotIn("warning", payload)
+
+    def test_hides_unexpected_error_text(self) -> None:
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", ["claude_usage.py"]), mock.patch.object(
+            CLAUDE_USAGE, "read_limits", side_effect=KeyError("internal detail")
+        ), contextlib.redirect_stdout(output):
+            code = CLAUDE_USAGE.main()
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output.getvalue())["error"], CLAUDE_USAGE.UNAVAILABLE)
 
     def test_never_prints_the_token(self) -> None:
         # A token http.client would reject, and one it rejects anyway.

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 import email.utils
 import fcntl
 import http.client
@@ -45,7 +45,11 @@ UNREADABLE_CREDENTIALS = "Identifiants Claude Code illisibles"
 CACHE_UNAVAILABLE = "Cache du widget inaccessible"
 
 
-class FetchError(RuntimeError):
+class LimitsError(RuntimeError):
+    """A failure whose message, in French, can be shown in the widget."""
+
+
+class FetchError(LimitsError):
     def __init__(self, message: str, retry_after: float = MIN_FETCH_INTERVAL_SECONDS) -> None:
         super().__init__(message)
         self.retry_after = retry_after
@@ -92,21 +96,21 @@ def access_token(path: Path, now: float) -> str:
         with path.open(encoding="utf-8") as handle:
             credentials = json.load(handle)
     except FileNotFoundError:
-        raise RuntimeError(SIGNED_OUT) from None
+        raise LimitsError(SIGNED_OUT) from None
     except (OSError, ValueError):
-        raise RuntimeError(UNREADABLE_CREDENTIALS) from None
+        raise LimitsError(UNREADABLE_CREDENTIALS) from None
 
     oauth = credentials.get("claudeAiOauth") if isinstance(credentials, dict) else None
     token = oauth.get("accessToken") if isinstance(oauth, dict) else None
     if not isinstance(token, str) or not token:
-        raise RuntimeError(SIGNED_OUT)
+        raise LimitsError(SIGNED_OUT)
     # Only visible ASCII can travel in the Authorization header.
     if not all("!" <= character <= "~" for character in token):
-        raise RuntimeError(UNREADABLE_CREDENTIALS)
+        raise LimitsError(UNREADABLE_CREDENTIALS)
 
     expires_at = oauth.get("expiresAt")  # Milliseconds.
     if is_number(expires_at) and expires_at / 1000 <= now:
-        raise RuntimeError(EXPIRED)
+        raise LimitsError(EXPIRED)
     return token
 
 
@@ -119,7 +123,10 @@ def retry_after(headers: Any) -> float:
         requested = float(value)
     else:
         try:
-            requested = email.utils.parsedate_to_datetime(value).timestamp() - time.time()
+            deadline = email.utils.parsedate_to_datetime(value)
+            if deadline.tzinfo is None:  # HTTP dates are in GMT.
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            requested = deadline.timestamp() - time.time()
         except (TypeError, ValueError, OverflowError):
             return RATE_LIMITED_BACKOFF_SECONDS
     # Rate limiting can persist past a short Retry-After, so it only extends
@@ -216,7 +223,7 @@ def usage_payload(raw: Any, updated_at: float) -> dict[str, Any]:
         for key, name in WINDOWS.items()
     }
     if all(window is None for window in windows.values()):
-        raise RuntimeError("Aucune limite Claude disponible pour ce compte")
+        raise LimitsError("Aucune limite Claude disponible pour ce compte")
     grants = parse_grants(raw.get("cedar_ember"))
     return {"ok": True, "updatedAt": int(updated_at), **windows, "resetGrants": grants}
 
@@ -270,7 +277,7 @@ def last_result(state: dict[str, Any]) -> dict[str, Any] | None:
         return None
     try:
         return usage_payload(state.get("limits"), updated_at)
-    except RuntimeError:
+    except LimitsError:
         return None
 
 
@@ -290,10 +297,14 @@ def fetch_due(state: dict[str, Any], now: float) -> bool:
 def outcome(state: dict[str, Any], now: float) -> dict[str, Any]:
     result, warning = last_result(state), last_warning(state)
     if result is None:
-        raise RuntimeError(warning or UNAVAILABLE)
+        raise LimitsError(warning or UNAVAILABLE)
     result = as_of(result, now)
-    # Keep the last known limits on screen; their age stays visible.
-    return {**result, "warning": warning} if warning else result
+    if not warning:
+        return result
+    # Keep the last known limits on screen; their age stays visible, and so
+    # does the next attempt after a long backoff.
+    retry_at = state.get("retryAt")
+    return {**result, "warning": warning, "retryAt": retry_at if is_number(retry_at) else None}
 
 
 @contextmanager
@@ -327,7 +338,7 @@ def updated_state(
         usage_payload(raw, 0)
     except FetchError as error:
         wait, warning = error.retry_after, str(error)
-    except RuntimeError as error:  # Missing credentials or a response without limits.
+    except LimitsError as error:  # Missing credentials or a response without limits.
         warning = str(error)
     except Exception:  # Anything else still keeps the last limits on screen.
         warning = UNAVAILABLE
@@ -381,7 +392,8 @@ def main() -> int:
         emit(read_limits(max(2.0, args.timeout)))
         return 0
     except Exception as error:  # Keep the executable data engine contract simple.
-        emit({"ok": False, "error": str(error), "updatedAt": int(time.time())})
+        message = str(error) if isinstance(error, LimitsError) else UNAVAILABLE
+        emit({"ok": False, "error": message, "updatedAt": int(time.time())})
         return 1
 
 

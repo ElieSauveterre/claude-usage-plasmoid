@@ -165,6 +165,16 @@ PlasmoidItem {
         return date.toLocaleString(Qt.locale(), "d MMM HH:mm")
     }
 
+    // Only a long backoff is worth announcing; short waits pass on their own.
+    function retryLabel(timestamp) {
+        if (!timestamp || timestamp * 1000 - Date.now() < 2 * 60 * 1000) {
+            return ""
+        }
+        const date = new Date(timestamp * 1000)
+        const sameDay = date.toDateString() === new Date().toDateString()
+        return " · " + qsTr("nouvel essai à %1").arg(date.toLocaleString(Qt.locale(), sameDay ? "HH:mm" : "d MMM HH:mm"))
+    }
+
     function capturedLabel(timestamp) {
         if (!timestamp) {
             return ""
@@ -188,7 +198,7 @@ PlasmoidItem {
         hasResetCredits = typeof payload.resetCreditsAvailable === "number"
         resetCreditsAvailable = hasResetCredits ? payload.resetCreditsAvailable : 0
         resetCreditExpiryText = deadlineLabel(payload.nextResetCreditExpiresAt)
-        warningMessage = payload.warning || ""
+        warningMessage = payload.warning ? payload.warning + retryLabel(payload.retryAt) : ""
         lastUpdatedText = capturedLabel(payload.updatedAt)
     }
 }
