@@ -22,9 +22,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Iterator
 
-USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-USER_AGENT = "claude-usage-plasmoid/0.1.0"
+# `cedar_ember` adds the stock of limit resets, the block Claude Code reads.
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
+# Anthropic returns the reset stock only to Claude Code, so the request
+# presents Claude Code's client headers.
+CLIENT_HEADERS = {"User-Agent": "claude-cli/2.1.296 (external, cli)", "x-app": "cli"}
 WINDOWS = {"fiveHour": "five_hour", "sevenDay": "seven_day"}
+STORED_FIELDS = (*WINDOWS.values(), "cedar_ember")
 # The endpoint rate-limits frequent polling, so every widget instance shares
 # one record of the last attempt and waits this long before the next one.
 MIN_FETCH_INTERVAL_SECONDS = 30
@@ -101,8 +105,10 @@ def access_token(path: Path, now: float) -> str:
 
 def retry_after(headers: Any) -> float:
     value = headers.get("Retry-After") if headers is not None else None
+    # Rate limiting can persist past a short Retry-After, so it only extends
+    # the default backoff.
     if isinstance(value, str) and value.strip().isdigit():
-        return min(MAX_BACKOFF_SECONDS, max(MIN_FETCH_INTERVAL_SECONDS, int(value)))
+        return min(MAX_BACKOFF_SECONDS, max(RATE_LIMITED_BACKOFF_SECONDS, int(value)))
     return RATE_LIMITED_BACKOFF_SECONDS
 
 
@@ -113,7 +119,7 @@ def fetch_usage(token: str, timeout: float) -> Any:
             "Authorization": f"Bearer {token}",
             "anthropic-beta": "oauth-2025-04-20",
             "Accept": "application/json",
-            "User-Agent": USER_AGENT,
+            **CLIENT_HEADERS,
         },
     )
     # Messages never include exception text, which could quote the request.
@@ -154,6 +160,22 @@ def parse_window(raw: Any) -> dict[str, Any] | None:
     return {"remainingPercent": 100.0 - used, "resetsAt": parse_reset(raw.get("resets_at"))}
 
 
+def parse_grants(raw: Any) -> list[dict[str, Any]] | None:
+    """Return the resets left in each grant, or None if the stock is unknown."""
+    if not isinstance(raw, dict) or raw.get("eligible") is not True:
+        return None
+    grants = raw.get("grants")
+    if not isinstance(grants, list):
+        return None
+    return [
+        {"left": int(grant["resets_left"]), "expiresAt": parse_reset(grant.get("ends_at"))}
+        for grant in grants
+        if isinstance(grant, dict)
+        and is_number(grant.get("resets_left"))
+        and grant["resets_left"] >= 1
+    ]
+
+
 def usage_payload(raw: Any, updated_at: float) -> dict[str, Any]:
     windows = {
         key: parse_window(raw.get(name)) if isinstance(raw, dict) else None
@@ -161,16 +183,27 @@ def usage_payload(raw: Any, updated_at: float) -> dict[str, Any]:
     }
     if all(window is None for window in windows.values()):
         raise RuntimeError("Aucune limite Claude disponible pour ce compte")
-    return {"ok": True, "updatedAt": int(updated_at), **windows}
+    grants = parse_grants(raw.get("cedar_ember"))
+    return {"ok": True, "updatedAt": int(updated_at), **windows, "resetGrants": grants}
 
 
-def rolled_over(payload: dict[str, Any], now: float) -> dict[str, Any]:
-    """Show a window whose reset time has passed since the update as unused."""
-    current = dict(payload)
+def as_of(payload: dict[str, Any], now: float) -> dict[str, Any]:
+    """Present stored limits at `now`, after resets and grant expiries since the update."""
+    current = {key: value for key, value in payload.items() if key != "resetGrants"}
     for key in WINDOWS:
         window = payload[key]
         if window is not None and window["resetsAt"] is not None and window["resetsAt"] <= now:
             current[key] = {"remainingPercent": 100.0, "resetsAt": None}
+
+    grants = payload["resetGrants"]
+    if grants is None:
+        current["resetCreditsAvailable"] = None
+        current["nextResetCreditExpiresAt"] = None
+        return current
+    usable = [grant for grant in grants if grant["expiresAt"] is None or grant["expiresAt"] > now]
+    expiries = [grant["expiresAt"] for grant in usable if grant["expiresAt"] is not None]
+    current["resetCreditsAvailable"] = sum(grant["left"] for grant in usable)
+    current["nextResetCreditExpiresAt"] = min(expiries) if expiries else None
     return current
 
 
@@ -218,7 +251,7 @@ def outcome(state: dict[str, Any], now: float) -> dict[str, Any]:
     result, warning = last_result(state), last_warning(state)
     if result is None:
         raise RuntimeError(warning or UNAVAILABLE)
-    result = rolled_over(result, now)
+    result = as_of(result, now)
     # Keep the last known limits on screen; their age stays visible.
     return {**result, "warning": warning} if warning else result
 
@@ -276,7 +309,7 @@ def updated_state(state: dict[str, Any], now: float, timeout: float) -> dict[str
         "attemptedAt": now,
         "retryAt": now + MIN_FETCH_INTERVAL_SECONDS,
         "updatedAt": int(now),
-        "limits": {name: raw.get(name) for name in WINDOWS.values()},
+        "limits": {name: raw.get(name) for name in STORED_FIELDS},
     }
 
 

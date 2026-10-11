@@ -19,6 +19,10 @@ Item {
     required property string lastUpdatedText
     required property string warningMessage
     readonly property bool showWarning: full.warningMessage.length > 0 && full.errorMessage.length === 0
+    required property bool hasResetCredits
+    required property int resetCreditsAvailable
+    required property string resetCreditExpiryText
+    readonly property bool showResetExpiry: full.hasResetCredits && full.resetCreditExpiryText.length > 0
     signal refreshRequested()
 
     Layout.minimumWidth: 250
@@ -26,7 +30,8 @@ Item {
     Layout.preferredWidth: 260
     Layout.preferredHeight: implicitHeight
     implicitWidth: 260
-    implicitHeight: 258 + (full.hasWeekly ? 24 : 0) + (full.showWeeklyReset ? 24 : 0) + (full.showWarning ? 18 : 0)
+    implicitHeight: 258 + (full.hasWeekly ? 24 : 0) + (full.showWeeklyReset ? 24 : 0)
+        + (full.hasResetCredits ? 24 : 0) + (full.showResetExpiry ? 24 : 0) + (full.showWarning ? 18 : 0)
 
     Rectangle {
         anchors.fill: parent
@@ -107,6 +112,20 @@ Item {
                     Layout.fillWidth: true
                     label: qsTr("Remise hebdomadaire")
                     value: full.weeklyResetText
+                }
+
+                MetricRow {
+                    visible: full.hasResetCredits
+                    Layout.fillWidth: true
+                    label: qsTr("Resets en stock")
+                    value: String(full.resetCreditsAvailable)
+                }
+
+                MetricRow {
+                    visible: full.showResetExpiry
+                    Layout.fillWidth: true
+                    label: qsTr("À utiliser avant")
+                    value: full.resetCreditExpiryText
                 }
             }
 

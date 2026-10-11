@@ -18,6 +18,9 @@ PlasmoidItem {
     property string errorMessage: ""
     property string lastUpdatedText: ""
     property string warningMessage: ""
+    property bool hasResetCredits: false
+    property int resetCreditsAvailable: 0
+    property string resetCreditExpiryText: ""
     property string activeCommand: ""
 
     Plasmoid.backgroundHints: PlasmaCore.Types.NoBackground
@@ -63,6 +66,9 @@ PlasmoidItem {
         errorMessage: root.errorMessage
         lastUpdatedText: root.lastUpdatedText
         warningMessage: root.warningMessage
+        hasResetCredits: root.hasResetCredits
+        resetCreditsAvailable: root.resetCreditsAvailable
+        resetCreditExpiryText: root.resetCreditExpiryText
         onRefreshRequested: root.refresh()
     }
 
@@ -151,6 +157,14 @@ PlasmoidItem {
         return date.toLocaleString(Qt.locale(), "ddd HH:mm")
     }
 
+    function deadlineLabel(timestamp) {
+        if (!timestamp) {
+            return ""
+        }
+        const date = new Date(timestamp * 1000)
+        return date.toLocaleString(Qt.locale(), "d MMM HH:mm")
+    }
+
     function capturedLabel(timestamp) {
         if (!timestamp) {
             return ""
@@ -171,6 +185,9 @@ PlasmoidItem {
         weeklyRemainingPercent = weekly ? weekly.remainingPercent : 0
         weeklyResetText = weekly ? resetLabel(weekly.resetsAt) : ""
         errorMessage = ""
+        hasResetCredits = typeof payload.resetCreditsAvailable === "number"
+        resetCreditsAvailable = hasResetCredits ? payload.resetCreditsAvailable : 0
+        resetCreditExpiryText = deadlineLabel(payload.nextResetCreditExpiresAt)
         warningMessage = payload.warning || ""
         lastUpdatedText = capturedLabel(payload.updatedAt)
     }

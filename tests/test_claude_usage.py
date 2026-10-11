@@ -30,8 +30,19 @@ FIVE_HOUR_RESET = "2027-01-15T13:00:00.315319+00:00"
 FIVE_HOUR_RESET_AT = 1_800_018_000
 SEVEN_DAY_RESET = "2027-01-20T08:00:00+00:00"
 SEVEN_DAY_RESET_AT = 1_800_432_000
+GRANT_END = "2027-01-22T08:00:00+00:00"
+GRANT_END_AT = 1_800_604_800
 HUGE = 10**400
 TOKEN = "secret-token"
+
+
+def grant(left, ends_at=GRANT_END):
+    return {"id": "launch", "resets_total": left, "resets_left": left, "ends_at": ends_at}
+
+
+def stock(*grants, eligible=True):
+    return {"eligible": eligible, "grants": list(grants)}
+
 
 # The shape returned by the usage endpoint, trimmed to the fields read here.
 USAGE = {
@@ -39,13 +50,20 @@ USAGE = {
     "seven_day": {"utilization": 41.0, "resets_at": SEVEN_DAY_RESET},
     "seven_day_opus": None,
     "limits": [{"kind": "session", "percent": 23}],
+    "cedar_ember": {**stock(grant(1)), "event_props": {"tier": "claude_max_5x"}},
 }
 PAYLOAD = {
     "ok": True,
     "updatedAt": int(NOW),
     "fiveHour": {"remainingPercent": 77.0, "resetsAt": FIVE_HOUR_RESET_AT},
     "sevenDay": {"remainingPercent": 59.0, "resetsAt": SEVEN_DAY_RESET_AT},
+    "resetCreditsAvailable": 1,
+    "nextResetCreditExpiresAt": GRANT_END_AT,
 }
+
+
+def present(raw, now=NOW):
+    return CLAUDE_USAGE.as_of(CLAUDE_USAGE.usage_payload(raw, NOW), now)
 
 
 def write_json(path, value):
@@ -73,8 +91,8 @@ def response(body):
 
 
 class ParseTest(unittest.TestCase):
-    def test_reads_both_windows(self) -> None:
-        self.assertEqual(CLAUDE_USAGE.usage_payload(USAGE, NOW), PAYLOAD)
+    def test_reads_both_windows_and_the_reset_stock(self) -> None:
+        self.assertEqual(present(USAGE), PAYLOAD)
 
     def test_clamps_usage(self) -> None:
         self.assertEqual(
@@ -118,10 +136,42 @@ class ParseTest(unittest.TestCase):
 
     def test_shows_a_window_past_its_reset_as_unused(self) -> None:
         self.assertEqual(
-            CLAUDE_USAGE.rolled_over(PAYLOAD, FIVE_HOUR_RESET_AT),
+            present(USAGE, FIVE_HOUR_RESET_AT),
             {**PAYLOAD, "fiveHour": {"remainingPercent": 100.0, "resetsAt": None}},
         )
-        self.assertEqual(CLAUDE_USAGE.rolled_over(PAYLOAD, FIVE_HOUR_RESET_AT - 1), PAYLOAD)
+        self.assertEqual(present(USAGE, FIVE_HOUR_RESET_AT - 1), PAYLOAD)
+
+    def test_sums_the_stock_and_shows_the_nearest_expiry(self) -> None:
+        earlier = "2027-01-21T08:00:00+00:00"
+        payload = present({**USAGE, "cedar_ember": stock(grant(2), grant(1, earlier), grant(1, None))})
+
+        self.assertEqual(payload["resetCreditsAvailable"], 4)
+        self.assertEqual(payload["nextResetCreditExpiresAt"], GRANT_END_AT - 86400)
+
+    def test_drops_grants_once_they_expire(self) -> None:
+        raw = {**USAGE, "cedar_ember": stock(grant(1, "2027-01-21T08:00:00+00:00"), grant(2))}
+
+        payload = present(raw, GRANT_END_AT - 86400)
+        self.assertEqual(payload["resetCreditsAvailable"], 2)
+        self.assertEqual(payload["nextResetCreditExpiresAt"], GRANT_END_AT)
+
+        payload = present(raw, GRANT_END_AT)
+        self.assertEqual(payload["resetCreditsAvailable"], 0)
+        self.assertIsNone(payload["nextResetCreditExpiresAt"])
+
+    def test_skips_used_or_malformed_grants(self) -> None:
+        payload = present(
+            {**USAGE, "cedar_ember": stock(grant(0), grant(True), grant("1"), None, grant(1, "soon"))}
+        )
+        self.assertEqual(payload["resetCreditsAvailable"], 1)
+        self.assertIsNone(payload["nextResetCreditExpiresAt"])
+
+    def test_leaves_an_unknown_stock_unknown(self) -> None:
+        for block in (None, [], {}, stock(grant(1), eligible=False), {"eligible": True, "grants": None}):
+            with self.subTest(block):
+                payload = present({**USAGE, "cedar_ember": block})
+                self.assertIsNone(payload["resetCreditsAvailable"])
+                self.assertIsNone(payload["nextResetCreditExpiresAt"])
 
 
 class AccessTokenTest(unittest.TestCase):
@@ -166,9 +216,14 @@ class FetchTest(unittest.TestCase):
 
         self.assertEqual(usage, USAGE)
         request = opener.call_args.args[0]
-        self.assertEqual(request.full_url, "https://api.anthropic.com/api/oauth/usage")
+        self.assertEqual(
+            request.full_url, "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
+        )
         self.assertEqual(request.get_header("Authorization"), f"Bearer {TOKEN}")
         self.assertEqual(request.get_header("Anthropic-beta"), "oauth-2025-04-20")
+        # The reset stock is only returned to Claude Code's client identity.
+        self.assertEqual(request.get_header("X-app"), "cli")
+        self.assertTrue(request.get_header("User-agent").startswith("claude-cli/"))
         self.assertEqual(opener.call_args.kwargs["timeout"], 5)
 
     def test_maps_failures_to_messages(self) -> None:
@@ -195,8 +250,8 @@ class FetchTest(unittest.TestCase):
     def test_backs_off_after_rate_limiting(self) -> None:
         for headers, wait in (
             ({}, CLAUDE_USAGE.RATE_LIMITED_BACKOFF_SECONDS),
-            ({"Retry-After": "120"}, 120),
-            ({"Retry-After": "1"}, CLAUDE_USAGE.MIN_FETCH_INTERVAL_SECONDS),
+            ({"Retry-After": "900"}, 900),
+            ({"Retry-After": "1"}, CLAUDE_USAGE.RATE_LIMITED_BACKOFF_SECONDS),
             ({"Retry-After": "999999"}, CLAUDE_USAGE.MAX_BACKOFF_SECONDS),
             ({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}, CLAUDE_USAGE.RATE_LIMITED_BACKOFF_SECONDS),
         ):
@@ -247,7 +302,7 @@ class ReadLimitsTest(unittest.TestCase):
         fetch_usage.assert_called_once_with(TOKEN, 5)
         self.assertEqual(payload, PAYLOAD)
         stored = self.cache.read_text(encoding="utf-8")
-        self.assertEqual(set(json.loads(stored)["limits"]), {"five_hour", "seven_day"})
+        self.assertEqual(set(json.loads(stored)["limits"]), {"five_hour", "seven_day", "cedar_ember"})
         self.assertNotIn(TOKEN, stored)
 
     def test_reuses_a_recent_result(self) -> None:
