@@ -31,7 +31,8 @@ Item {
     Layout.preferredHeight: implicitHeight
     implicitWidth: 260
     implicitHeight: 258 + (full.hasWeekly ? 24 : 0) + (full.showWeeklyReset ? 24 : 0)
-        + (full.hasResetCredits ? 24 : 0) + (full.showResetExpiry ? 24 : 0) + (full.showWarning ? 18 : 0)
+        + (full.hasResetCredits ? 24 : 0) + (full.showResetExpiry ? 24 : 0)
+        + (statusLine.lineCount - 1) * 12 + (full.showWarning ? 6 + warningLine.lineCount * 12 : 0)
 
     Rectangle {
         anchors.fill: parent
@@ -130,19 +131,25 @@ Item {
             }
 
             Text {
+                id: statusLine
                 Layout.fillWidth: true
                 color: full.errorMessage.length > 0 ? "#ef9a9a" : "#7f8991"
                 elide: Text.ElideRight
+                maximumLineCount: 2
+                wrapMode: Text.WordWrap
                 font.pixelSize: 9
                 horizontalAlignment: Text.AlignHCenter
                 text: full.errorMessage.length > 0 ? full.errorMessage : full.lastUpdatedText
             }
 
             Text {
+                id: warningLine
                 visible: full.showWarning
                 Layout.fillWidth: true
                 color: "#ef9a9a"
                 elide: Text.ElideRight
+                maximumLineCount: 2
+                wrapMode: Text.WordWrap
                 font.pixelSize: 9
                 horizontalAlignment: Text.AlignHCenter
                 text: full.warningMessage

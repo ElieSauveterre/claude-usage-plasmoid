@@ -291,11 +291,16 @@ class FetchTest(unittest.TestCase):
             self.assertEqual(raised.exception.retry_after, wait)
 
     def test_reads_a_retry_after_date_in_gmt(self) -> None:
+        # A zone far from UTC shows a date misread as local time.
+        with mock.patch.dict(os.environ, {"TZ": "America/Toronto"}):
+            time.tzset()
+            self.addCleanup(time.tzset)
+            self.check_retry_after_dates()
+
+    def check_retry_after_dates(self) -> None:
         deadline = time.time() + 7200
-        for value in (
-            email.utils.formatdate(deadline, usegmt=True),
-            email.utils.formatdate(deadline).replace("+0000", "-0000"),
-        ):
+        # "-0000" marks a date without a zone, which Python reads as naive.
+        for value in (email.utils.formatdate(deadline, usegmt=True), email.utils.formatdate(deadline)):
             with self.subTest(value), self.assertRaises(CLAUDE_USAGE.FetchError) as raised:
                 self.fetch(side_effect=http_error(429, {"Retry-After": value}))
             # The date has whole seconds and is measured from the current time.
@@ -461,7 +466,7 @@ class ReadLimitsTest(unittest.TestCase):
             payload, fetch_usage = self.read(now=NOW + 600, return_value=USAGE)
         fetch_usage.assert_not_called()
         self.assertEqual(
-            payload, {**PAYLOAD, "warning": CLAUDE_USAGE.CACHE_UNAVAILABLE, "retryAt": NOW + 30}
+            payload, {**PAYLOAD, "warning": CLAUDE_USAGE.CACHE_UNAVAILABLE, "retryAt": None}
         )
 
     def test_keeps_the_backoff_when_the_answer_cannot_be_stored(self) -> None:

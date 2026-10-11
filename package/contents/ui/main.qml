@@ -91,6 +91,7 @@ PlasmoidItem {
                 if (!payload.ok) {
                     root.errorMessage = (payload.error || qsTr("Données Claude indisponibles"))
                         + root.retryLabel(payload.retryAt)
+                    root.scheduleRetry(payload.retryAt)
                     return
                 }
                 root.applyPayload(payload)
@@ -105,6 +106,12 @@ PlasmoidItem {
         interval: 5 * 60 * 1000
         repeat: true
         running: true
+        onTriggered: root.refresh()
+    }
+
+    // Retry as soon as a backoff ends, so the announced time holds.
+    Timer {
+        id: retryTimer
         onTriggered: root.refresh()
     }
 
@@ -166,6 +173,16 @@ PlasmoidItem {
         return date.toLocaleString(Qt.locale(), "d MMM HH:mm")
     }
 
+    function scheduleRetry(timestamp) {
+        retryTimer.stop()
+        const delay = timestamp ? timestamp * 1000 - Date.now() : 0
+        // The helper caps backoffs at a day; anything later is not a backoff.
+        if (delay > 0 && delay <= 24 * 60 * 60 * 1000) {
+            retryTimer.interval = delay + 2000
+            retryTimer.start()
+        }
+    }
+
     // Only a long backoff is worth announcing; short waits pass on their own.
     function retryLabel(timestamp) {
         if (!timestamp || timestamp * 1000 - Date.now() < 2 * 60 * 1000) {
@@ -200,6 +217,7 @@ PlasmoidItem {
         resetCreditsAvailable = hasResetCredits ? payload.resetCreditsAvailable : 0
         resetCreditExpiryText = deadlineLabel(payload.nextResetCreditExpiresAt)
         warningMessage = payload.warning ? payload.warning + retryLabel(payload.retryAt) : ""
+        scheduleRetry(payload.warning ? payload.retryAt : null)
         lastUpdatedText = capturedLabel(payload.updatedAt)
     }
 }

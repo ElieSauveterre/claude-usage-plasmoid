@@ -379,10 +379,11 @@ def read_limits(timeout: float, clock: Callable[[], float] = time.time) -> dict[
                     save_state(path, state)
                 except OSError:
                     pass  # The recorded attempt still delays the next helper.
+    # Without the lock this helper cannot vouch for the stored next attempt.
     except TimeoutError:  # Another helper is still waiting on the endpoint.
-        state = load_state(path)
+        state = {**load_state(path), "retryAt": None}
     except OSError:
-        state = {**load_state(path), "warning": CACHE_UNAVAILABLE}
+        state = {**load_state(path), "warning": CACHE_UNAVAILABLE, "retryAt": None}
     # Resets and expiries can pass while waiting on the lock or the endpoint.
     return outcome(state, clock())
 
