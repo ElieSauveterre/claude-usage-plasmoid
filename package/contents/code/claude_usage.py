@@ -169,20 +169,35 @@ def parse_window(raw: Any) -> dict[str, Any] | None:
     return {"remainingPercent": 100.0 - used, "resetsAt": parse_reset(raw.get("resets_at"))}
 
 
+def parse_grant(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    left = raw.get("resets_left")
+    if not isinstance(left, int) or isinstance(left, bool) or left < 0:
+        return None
+    # A missing or null date means the grant has no such bound; any other
+    # value must parse.
+    bounds = {}
+    for key, field in (("startsAt", "starts_at"), ("expiresAt", "ends_at")):
+        value = raw.get(field)
+        bounds[key] = None if value is None else parse_reset(value)
+        if value is not None and bounds[key] is None:
+            return None
+    return {"left": left, **bounds}
+
+
 def parse_grants(raw: Any) -> list[dict[str, Any]] | None:
-    """Return the resets left in each grant, or None if the stock is unknown."""
+    """Return the resets left in each grant, or None if the stock is unknown.
+
+    One unreadable grant makes the whole stock unknown rather than smaller.
+    """
     if not isinstance(raw, dict) or raw.get("eligible") is not True:
         return None
     grants = raw.get("grants")
     if not isinstance(grants, list):
         return None
-    return [
-        {"left": int(grant["resets_left"]), "expiresAt": parse_reset(grant.get("ends_at"))}
-        for grant in grants
-        if isinstance(grant, dict)
-        and is_number(grant.get("resets_left"))
-        and grant["resets_left"] >= 1
-    ]
+    parsed = [parse_grant(grant) for grant in grants]
+    return None if None in parsed else parsed
 
 
 def usage_payload(raw: Any, updated_at: float) -> dict[str, Any]:
@@ -209,7 +224,13 @@ def as_of(payload: dict[str, Any], now: float) -> dict[str, Any]:
         current["resetCreditsAvailable"] = None
         current["nextResetCreditExpiresAt"] = None
         return current
-    usable = [grant for grant in grants if grant["expiresAt"] is None or grant["expiresAt"] > now]
+    usable = [
+        grant
+        for grant in grants
+        if grant["left"] > 0
+        and (grant["startsAt"] is None or grant["startsAt"] <= now)
+        and (grant["expiresAt"] is None or grant["expiresAt"] > now)
+    ]
     expiries = [grant["expiresAt"] for grant in usable if grant["expiresAt"] is not None]
     current["resetCreditsAvailable"] = sum(grant["left"] for grant in usable)
     current["nextResetCreditExpiresAt"] = min(expiries) if expiries else None
@@ -320,9 +341,10 @@ def read_limits(timeout: float, clock: Callable[[], float] = time.time) -> dict[
             state = load_state(path)
             if fetch_due(state, now):
                 # Without a stored attempt the throttle cannot hold, so the
-                # endpoint is only called once the attempt is recorded.
+                # endpoint is only called once the attempt is recorded. It
+                # assumes the longest usual wait until the answer is stored.
                 save_state(
-                    path, {**state, "attemptedAt": now, "retryAt": now + MIN_FETCH_INTERVAL_SECONDS}
+                    path, {**state, "attemptedAt": now, "retryAt": now + RATE_LIMITED_BACKOFF_SECONDS}
                 )
                 state = updated_state(state, timeout, clock)
                 try:
@@ -330,10 +352,11 @@ def read_limits(timeout: float, clock: Callable[[], float] = time.time) -> dict[
                 except OSError:
                     pass  # The recorded attempt still delays the next helper.
     except TimeoutError:  # Another helper is still waiting on the endpoint.
-        now, state = clock(), load_state(path)
+        state = load_state(path)
     except OSError:
-        now, state = clock(), {**load_state(path), "warning": CACHE_UNAVAILABLE}
-    return outcome(state, now)
+        state = {**load_state(path), "warning": CACHE_UNAVAILABLE}
+    # Resets and expiries can pass while waiting on the lock or the endpoint.
+    return outcome(state, clock())
 
 
 def main() -> int:

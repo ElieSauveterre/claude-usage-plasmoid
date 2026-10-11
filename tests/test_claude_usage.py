@@ -161,12 +161,33 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(payload["resetCreditsAvailable"], 0)
         self.assertIsNone(payload["nextResetCreditExpiresAt"])
 
-    def test_skips_used_or_malformed_grants(self) -> None:
-        payload = present(
-            {**USAGE, "cedar_ember": stock(grant(0), grant(True), grant("1"), None, grant(1, "soon"))}
-        )
+    def test_skips_used_grants(self) -> None:
+        payload = present({**USAGE, "cedar_ember": stock(grant(0, "2027-01-16T08:00:00+00:00"), grant(1))})
         self.assertEqual(payload["resetCreditsAvailable"], 1)
-        self.assertIsNone(payload["nextResetCreditExpiresAt"])
+        self.assertEqual(payload["nextResetCreditExpiresAt"], GRANT_END_AT)
+
+    def test_counts_a_grant_only_once_it_starts(self) -> None:
+        later = {**grant(1), "starts_at": "2027-01-16T08:00:00+00:00"}
+        raw = {**USAGE, "cedar_ember": stock(later)}
+
+        self.assertEqual(present(raw, NOW)["resetCreditsAvailable"], 0)
+        self.assertEqual(present(raw, NOW + 86400)["resetCreditsAvailable"], 1)
+
+    def test_treats_an_unreadable_grant_as_an_unknown_stock(self) -> None:
+        for bad in (
+            None,
+            grant(True),
+            grant("1"),
+            grant(1.0),
+            grant(-1),
+            grant(1, "soon"),
+            grant(1, "2027-01-22T08:00:00"),
+            {**grant(1), "starts_at": 5},
+        ):
+            with self.subTest(bad):
+                payload = present({**USAGE, "cedar_ember": stock(grant(1), bad)})
+                self.assertIsNone(payload["resetCreditsAvailable"])
+                self.assertEqual(payload["fiveHour"], PAYLOAD["fiveHour"])
 
     def test_leaves_an_unknown_stock_unknown(self) -> None:
         for block in (None, [], {}, stock(grant(1), eligible=False), {"eligible": True, "grants": None}):
@@ -418,6 +439,24 @@ class ReadLimitsTest(unittest.TestCase):
         fetch_usage.assert_not_called()
         self.assertEqual(payload, {**PAYLOAD, "warning": CLAUDE_USAGE.CACHE_UNAVAILABLE})
 
+    def test_keeps_the_backoff_when_the_answer_cannot_be_stored(self) -> None:
+        real_save = CLAUDE_USAGE.save_state
+        saves = []
+
+        def save_once(path, state):
+            saves.append(state)
+            if len(saves) > 1:
+                raise OSError
+            real_save(path, state)
+
+        with mock.patch.object(CLAUDE_USAGE, "save_state", side_effect=save_once):
+            with self.assertRaises(RuntimeError):
+                self.fail(NOW, "Trop de requêtes à Claude", retry_after=300)
+        with mock.patch.object(CLAUDE_USAGE, "fetch_usage", return_value=USAGE) as fetch_usage:
+            with self.assertRaises(RuntimeError):
+                CLAUDE_USAGE.read_limits(5, clock=lambda: NOW + 299)
+        fetch_usage.assert_not_called()
+
     def test_times_the_backoff_from_the_answer(self) -> None:
         clock = [NOW]
 
@@ -430,6 +469,20 @@ class ReadLimitsTest(unittest.TestCase):
                 CLAUDE_USAGE.read_limits(5, clock=lambda: clock[0])
         stored = json.loads(self.cache.read_text(encoding="utf-8"))
         self.assertEqual(stored["retryAt"], NOW + 315)
+
+    def test_presents_the_limits_as_of_the_answer(self) -> None:
+        self.read(return_value=USAGE)
+        write_json(Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".credentials.json", credentials(expires_at=None))
+        clock = [GRANT_END_AT - 5]
+
+        def slow_failure(*_):
+            clock[0] += 15
+            raise CLAUDE_USAGE.FetchError("Claude injoignable")
+
+        with mock.patch.object(CLAUDE_USAGE, "fetch_usage", side_effect=slow_failure):
+            payload = CLAUDE_USAGE.read_limits(5, clock=lambda: clock[0])
+        self.assertEqual(payload["resetCreditsAvailable"], 0)
+        self.assertIsNone(payload["nextResetCreditExpiresAt"])
 
     def test_waits_for_the_helper_holding_the_lock(self) -> None:
         clock = [NOW]
