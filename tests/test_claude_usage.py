@@ -377,14 +377,14 @@ class ReadLimitsTest(unittest.TestCase):
         self.read(return_value=USAGE)
         payload, _ = self.fail_fetch(NOW + 600)
 
-        self.assertEqual(payload, {**PAYLOAD, "warning": "Claude injoignable", "retryAt": NOW + 630})
+        self.assertEqual(payload, {**PAYLOAD, "warning": "Claude injoignable", "retryAt": None})
 
     def test_keeps_the_last_limits_after_an_unexpected_failure(self) -> None:
         self.read(return_value=USAGE)
         # Python's own RuntimeError subclasses are not messages for the widget.
         payload, _ = self.read(now=NOW + 600, side_effect=RecursionError("Stack overflow"))
 
-        self.assertEqual(payload, {**PAYLOAD, "warning": CLAUDE_USAGE.UNAVAILABLE, "retryAt": NOW + 630})
+        self.assertEqual(payload, {**PAYLOAD, "warning": CLAUDE_USAGE.UNAVAILABLE, "retryAt": None})
 
     def test_waits_after_a_failure(self) -> None:
         self.read(return_value=USAGE)
@@ -392,13 +392,23 @@ class ReadLimitsTest(unittest.TestCase):
         payload, fetch_usage = self.read(now=NOW + 629, return_value=USAGE)
 
         fetch_usage.assert_not_called()
-        self.assertEqual(payload, {**PAYLOAD, "warning": "Claude injoignable", "retryAt": NOW + 630})
+        self.assertEqual(payload, {**PAYLOAD, "warning": "Claude injoignable", "retryAt": None})
 
         payload, fetch_usage = self.read(now=NOW + 630, return_value=USAGE)
         fetch_usage.assert_called_once()
         self.assertNotIn("warning", payload)
 
+    def test_reports_only_a_rate_limit_backoff(self) -> None:
+        self.read(return_value=USAGE)
+        # The usual 30 s spacing is left to the widget's own poll.
+        payload, _ = self.fail_fetch(NOW + 600)
+        self.assertIsNone(payload["retryAt"])
+
+        payload, _ = self.fail_fetch(NOW + 700, "Trop de requêtes à Claude", retry_after=300)
+        self.assertEqual(payload["retryAt"], NOW + 1000)
+
     def test_honors_the_rate_limit_backoff(self) -> None:
+
         self.read(return_value=USAGE)
         self.fail_fetch(NOW + 600, "Trop de requêtes à Claude", retry_after=300)
 

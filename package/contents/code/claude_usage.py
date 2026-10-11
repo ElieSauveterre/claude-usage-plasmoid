@@ -296,10 +296,21 @@ def fetch_due(state: dict[str, Any], now: float) -> bool:
     return not attempted_at <= now < retry_at
 
 
+def backoff_end(state: dict[str, Any]) -> float | None:
+    """Return when a wait longer than the usual interval ends, if one applies.
+
+    The usual interval only spaces out helpers; the widget's poll covers it.
+    """
+    attempted_at, retry_at = state.get("attemptedAt"), state.get("retryAt")
+    if is_number(attempted_at) and is_number(retry_at):
+        if retry_at - attempted_at > MIN_FETCH_INTERVAL_SECONDS:
+            return retry_at
+    return None
+
+
 def outcome(state: dict[str, Any], now: float) -> dict[str, Any]:
     result, warning = last_result(state), last_warning(state)
-    retry_at = state.get("retryAt")
-    retry_at = retry_at if is_number(retry_at) else None
+    retry_at = backoff_end(state)
     if result is None:
         error = LimitsError(warning or UNAVAILABLE)
         error.retry_at = retry_at

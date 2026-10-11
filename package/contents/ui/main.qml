@@ -112,7 +112,15 @@ PlasmoidItem {
     // Retry as soon as a backoff ends, so the announced time holds.
     Timer {
         id: retryTimer
-        onTriggered: root.refresh()
+        onTriggered: {
+            if (root.loading) {
+                // A refresh started before the backoff ended; try again after it.
+                interval = 5000
+                start()
+            } else {
+                root.refresh()
+            }
+        }
     }
 
     // A helper stuck on the network must not block later refreshes.
@@ -183,9 +191,9 @@ PlasmoidItem {
         }
     }
 
-    // Only a long backoff is worth announcing; short waits pass on their own.
+    // The helper only reports the end of a rate-limit backoff.
     function retryLabel(timestamp) {
-        if (!timestamp || timestamp * 1000 - Date.now() < 2 * 60 * 1000) {
+        if (!timestamp || timestamp * 1000 <= Date.now()) {
             return ""
         }
         const date = new Date(timestamp * 1000)
