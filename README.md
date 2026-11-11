@@ -1,6 +1,6 @@
 # Claude Usage for Plasma 6
 
-Un plasmoïde KDE Plasma 6 qui affiche les limites de votre abonnement Claude Pro ou Max : le pourcentage restant sur la fenêtre de 5 heures, sur la fenêtre de 7 jours, leurs heures de remise à zéro, ainsi que les resets de limites en stock et leur date limite d'utilisation.
+Un plasmoïde KDE Plasma 6 qui affiche les limites de votre abonnement Claude Pro ou Max : le pourcentage restant sur la fenêtre de 5 heures, sur la fenêtre de 7 jours et sur la limite hebdomadaire propre aux modèles Fable, les heures de remise à zéro, ainsi que les resets de limites en stock et leur date limite d'utilisation.
 
 Le widget interroge l'usage du compte connecté à Claude Code. Il compte donc l'utilisation de Claude Code, de claude.ai et des autres applications Claude, même quand Claude Code n'est pas ouvert.
 
