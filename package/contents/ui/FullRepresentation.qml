@@ -14,6 +14,8 @@ Item {
     required property bool hasWeekly
     required property real weeklyRemainingPercent
     required property string weeklyResetText
+    required property bool hasFable
+    required property real fableRemainingPercent
     required property bool loading
     required property string errorMessage
     required property string lastUpdatedText
@@ -31,7 +33,7 @@ Item {
     Layout.preferredHeight: implicitHeight
     implicitWidth: 260
     implicitHeight: 258 + (full.hasWeekly ? 24 : 0) + (full.showWeeklyReset ? 24 : 0)
-        + (full.hasResetCredits ? 24 : 0) + (full.showResetExpiry ? 24 : 0)
+        + (full.hasFable ? 24 : 0) + (full.hasResetCredits ? 24 : 0) + (full.showResetExpiry ? 24 : 0)
         + (statusLine.lineCount - 1) * 12 + (full.showWarning ? 6 + warningLine.lineCount * 12 : 0)
 
     Rectangle {
@@ -113,6 +115,13 @@ Item {
                     Layout.fillWidth: true
                     label: qsTr("Remise hebdomadaire")
                     value: full.weeklyResetText
+                }
+
+                MetricRow {
+                    visible: full.hasFable
+                    Layout.fillWidth: true
+                    label: qsTr("Restant Fable")
+                    value: Math.round(full.fableRemainingPercent) + "%"
                 }
 
                 MetricRow {

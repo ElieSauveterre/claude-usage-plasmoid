@@ -52,7 +52,15 @@ USAGE = {
     "five_hour": {"utilization": 23.0, "resets_at": FIVE_HOUR_RESET},
     "seven_day": {"utilization": 41.0, "resets_at": SEVEN_DAY_RESET},
     "seven_day_opus": None,
-    "limits": [{"kind": "session", "percent": 23}],
+    "limits": [
+        {"kind": "weekly_all", "percent": 41, "resets_at": SEVEN_DAY_RESET, "scope": None},
+        {
+            "kind": "weekly_scoped",
+            "percent": 3,
+            "resets_at": SEVEN_DAY_RESET,
+            "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None},
+        },
+    ],
     "cedar_ember": {**stock(grant(1)), "event_props": {"tier": "claude_max_5x"}},
 }
 PAYLOAD = {
@@ -60,6 +68,7 @@ PAYLOAD = {
     "updatedAt": int(NOW),
     "fiveHour": {"remainingPercent": 77.0, "resetsAt": FIVE_HOUR_RESET_AT},
     "sevenDay": {"remainingPercent": 59.0, "resetsAt": SEVEN_DAY_RESET_AT},
+    "fable": {"remainingPercent": 97.0, "resetsAt": SEVEN_DAY_RESET_AT},
     "resetCreditsAvailable": 1,
     "nextResetCreditExpiresAt": GRANT_END_AT,
 }
@@ -143,6 +152,18 @@ class ParseTest(unittest.TestCase):
             {**PAYLOAD, "fiveHour": {"remainingPercent": 100.0, "resetsAt": None}},
         )
         self.assertEqual(present(USAGE, FIVE_HOUR_RESET_AT - 1), PAYLOAD)
+
+    def test_shows_the_fable_window_past_its_reset_as_unused(self) -> None:
+        self.assertEqual(
+            present(USAGE, SEVEN_DAY_RESET_AT)["fable"], {"remainingPercent": 100.0, "resetsAt": None}
+        )
+
+    def test_omits_the_fable_window_when_the_account_has_none(self) -> None:
+        for limits in (None, {}, [None, {"scope": None}], USAGE["limits"][:1]):
+            with self.subTest(limits):
+                payload = present({**USAGE, "limits": limits})
+                self.assertIsNone(payload["fable"])
+                self.assertEqual(payload["sevenDay"], PAYLOAD["sevenDay"])
 
     def test_sums_the_stock_and_shows_the_nearest_expiry(self) -> None:
         earlier = "2027-01-21T08:00:00+00:00"
@@ -349,7 +370,7 @@ class ReadLimitsTest(unittest.TestCase):
         fetch_usage.assert_called_once_with(TOKEN, 5)
         self.assertEqual(payload, PAYLOAD)
         stored = self.cache.read_text(encoding="utf-8")
-        self.assertEqual(set(json.loads(stored)["limits"]), {"five_hour", "seven_day", "cedar_ember"})
+        self.assertEqual(set(json.loads(stored)["limits"]), {"five_hour", "seven_day", "limits", "cedar_ember"})
         self.assertNotIn(TOKEN, stored)
 
     def test_reuses_a_recent_result(self) -> None:

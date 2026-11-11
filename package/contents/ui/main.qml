@@ -14,6 +14,8 @@ PlasmoidItem {
     property bool hasWeekly: false
     property real weeklyRemainingPercent: 0
     property string weeklyResetText: ""
+    property bool hasFable: false
+    property real fableRemainingPercent: 0
     property bool loading: false
     property string errorMessage: ""
     property string lastUpdatedText: ""
@@ -62,6 +64,8 @@ PlasmoidItem {
         hasWeekly: root.hasWeekly
         weeklyRemainingPercent: root.weeklyRemainingPercent
         weeklyResetText: root.weeklyResetText
+        hasFable: root.hasFable
+        fableRemainingPercent: root.fableRemainingPercent
         loading: root.loading
         errorMessage: root.errorMessage
         lastUpdatedText: root.lastUpdatedText
@@ -196,6 +200,8 @@ PlasmoidItem {
         hasWeekly = weekly !== null
         weeklyRemainingPercent = weekly ? weekly.remainingPercent : 0
         weeklyResetText = weekly ? resetLabel(weekly.resetsAt) : ""
+        hasFable = !!payload.fable
+        fableRemainingPercent = payload.fable ? payload.fable.remainingPercent : 0
         errorMessage = ""
         hasResetCredits = typeof payload.resetCreditsAvailable === "number"
         resetCreditsAvailable = hasResetCredits ? payload.resetCreditsAvailable : 0

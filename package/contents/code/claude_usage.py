@@ -30,7 +30,8 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=
 # presents Claude Code's client headers.
 CLIENT_HEADERS = {"User-Agent": "claude-cli/2.1.296 (external, cli)", "x-app": "cli"}
 WINDOWS = {"fiveHour": "five_hour", "sevenDay": "seven_day"}
-STORED_FIELDS = (*WINDOWS.values(), "cedar_ember")
+# `limits` lists the model-scoped windows, such as the weekly Fable limit.
+STORED_FIELDS = (*WINDOWS.values(), "limits", "cedar_ember")
 # The endpoint rate-limits frequent polling, so every widget instance shares
 # one record of the last attempt and waits this long before the next one.
 MIN_FETCH_INTERVAL_SECONDS = 30
@@ -188,6 +189,19 @@ def parse_window(raw: Any) -> dict[str, Any] | None:
     return {"remainingPercent": 100.0 - used, "resetsAt": parse_reset(raw.get("resets_at"))}
 
 
+def parse_fable(raw: Any) -> dict[str, Any] | None:
+    """Return the window scoped to Fable models, as Claude Code's /usage finds it."""
+    if not isinstance(raw, list):
+        return None
+    for limit in raw:
+        scope = limit.get("scope") if isinstance(limit, dict) else None
+        model = scope.get("model") if isinstance(scope, dict) else None
+        name = model.get("display_name") if isinstance(model, dict) else None
+        if isinstance(name, str) and name.lower().startswith("fable"):
+            return parse_window({"utilization": limit.get("percent"), "resets_at": limit.get("resets_at")})
+    return None
+
+
 def parse_grant(raw: Any) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
@@ -226,14 +240,15 @@ def usage_payload(raw: Any, updated_at: float) -> dict[str, Any]:
     }
     if all(window is None for window in windows.values()):
         raise LimitsError("Aucune limite Claude disponible pour ce compte")
+    fable = parse_fable(raw.get("limits"))
     grants = parse_grants(raw.get("cedar_ember"))
-    return {"ok": True, "updatedAt": int(updated_at), **windows, "resetGrants": grants}
+    return {"ok": True, "updatedAt": int(updated_at), **windows, "fable": fable, "resetGrants": grants}
 
 
 def as_of(payload: dict[str, Any], now: float) -> dict[str, Any]:
     """Present stored limits at `now`, after resets and grant expiries since the update."""
     current = {key: value for key, value in payload.items() if key != "resetGrants"}
-    for key in WINDOWS:
+    for key in (*WINDOWS, "fable"):
         window = payload[key]
         if window is not None and window["resetsAt"] is not None and window["resetsAt"] <= now:
             current[key] = {"remainingPercent": 100.0, "resetsAt": None}
